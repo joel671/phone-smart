@@ -1,0 +1,12 @@
+{
+  "name": "phone-smart",
+  "version": "1.0.0",
+  "description": "Phone Smart — T9 Word Challenge Game",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'Static build'"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0"
+  }
+}
