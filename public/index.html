@@ -1,0 +1,178 @@
+<script>
+// ================== SUPABASE CONFIG (your keys) ==================
+const SUPABASE_URL = 'https://shlcliptsikxdzbacxte.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNobGNsaXB0c2lreGR6YmFjeHRlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzNzcxMjUsImV4cCI6MjA5MDk1MzEyNX0.sm4Wvmv-rpFbC2IzCYiNctGpB77pQF_Y0993XVbFgMc';
+
+const { createClient } = supabase;   // ← This is the correct way with CDN
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ================== GAME VARIABLES ==================
+let currentUser = null;
+let userStats = null;
+let selectedLevel = null;
+let currentQuestion = null;
+let usedQuestions = [];
+let currentLetterIndex = 0;
+let multiPressState = {};
+let lives = 3;
+let timerLeft = 60;
+let timerMax = 60;
+let timerInterval = null;
+let gameScore = 0;
+let combo = 0;
+
+// ================== YOUR LEVEL_CONFIG, QUESTIONS, NUM_LETTERS, etc. ==================
+// Paste all your game constants and helper functions here (beep, playCorrect, playWrong, etc.)
+
+// ================== AUTH FUNCTIONS ==================
+async function handleRegister() {
+  const username = document.getElementById('reg-name').value.trim();
+  const email = document.getElementById('reg-email').value.trim();
+  const pass = document.getElementById('reg-pass').value;
+  const errEl = document.getElementById('reg-error');
+  errEl.textContent = '';
+
+  if (!username || username.length < 2) return errEl.textContent = 'Username must be at least 2 characters';
+  if (!/^[a-zA-Z0-9_]+$/.test(username)) return errEl.textContent = 'Username: letters, numbers, underscores only';
+  if (!email || !email.includes('@')) return errEl.textContent = 'Enter a valid email';
+  if (pass.length < 6) return errEl.textContent = 'Password must be at least 6 characters';
+
+  const regBtn = document.querySelector('#register-screen .btn') || document.getElementById('reg-btn');
+  if (regBtn) { regBtn.textContent = 'CREATING...'; regBtn.disabled = true; }
+
+  try {
+    const { data, error: signUpError } = await sb.auth.signUp({ email, password: pass });
+    if (signUpError) throw signUpError;
+
+    if (!data.user) throw new Error('Signup failed - no user returned');
+
+    // Create profile
+    const { error: profileError } = await sb.from('profiles').insert({
+      id: data.user.id,
+      username: username
+    });
+
+    if (profileError) {
+      throw new Error(profileError.message.includes('duplicate') ? 'Username already taken' : 'Could not create profile');
+    }
+
+    currentUser = { id: data.user.id, username, email };
+    await loadUserStats();
+    showScreen('level-screen');
+  } catch (err) {
+    errEl.textContent = err.message;
+  } finally {
+    if (regBtn) { regBtn.textContent = 'CREATE ACCOUNT ▶'; regBtn.disabled = false; }
+  }
+}
+
+async function handleLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  const errEl = document.getElementById('login-error');
+  errEl.textContent = '';
+
+  try {
+    const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+    if (error) throw error;
+
+    const { data: profile } = await sb.from('profiles').select('username').eq('id', data.user.id).single();
+    if (!profile) throw new Error('Profile not found. Please register again.');
+
+    currentUser = { id: data.user.id, username: profile.username, email };
+    await loadUserStats();
+    showScreen('level-screen');
+  } catch (err) {
+    errEl.textContent = err.message;
+  }
+}
+
+function handleGuestLogin() {
+  currentUser = { username: 'Guest', isGuest: true };
+  if (document.getElementById('player-name')) document.getElementById('player-name').textContent = 'Guest';
+  showScreen('level-screen');
+}
+
+async function handleLogout() {
+  await sb.auth.signOut();
+  currentUser = null;
+  userStats = null;
+  showScreen('splash-screen');
+}
+
+// ================== STATS & SAVE SCORE ==================
+async function loadUserStats() {
+  if (!currentUser || currentUser.isGuest) return;
+  const { data } = await sb.from('stats').select('*').eq('user_id', currentUser.id).single();
+  userStats = data || {};
+  renderStats();
+}
+
+function renderStats() {
+  const s = userStats || {};
+  if (document.getElementById('player-name')) document.getElementById('player-name').textContent = currentUser.username;
+  // Add the rest of your stat updates here (total_score, best_score, etc.)
+}
+
+async function saveScore(total, won) {
+  if (currentUser?.isGuest) return;
+
+  try {
+    await sb.from('scores').insert({
+      user_id: currentUser.id,
+      username: currentUser.username,
+      level: selectedLevel,
+      score: total,
+      time_left: timerLeft || 0,
+      lives_left: lives || 0,
+      phrase: currentQuestion?.phrase || '',
+      category: currentQuestion?.category || '',
+      won: won
+    });
+
+    // Upsert stats
+    const { data: existing } = await sb.from('stats').select('*').eq('user_id', currentUser.id).single();
+    const prev = existing || {};
+    const newStats = {
+      user_id: currentUser.id,
+      username: currentUser.username,
+      total_score: (prev.total_score || 0) + total,
+      games_played: (prev.games_played || 0) + 1,
+      games_won: (prev.games_won || 0) + (won ? 1 : 0),
+      best_score: Math.max(prev.best_score || 0, total),
+      easy_best: selectedLevel === 'easy' ? Math.max(prev.easy_best || 0, total) : (prev.easy_best || 0),
+      medium_best: selectedLevel === 'medium' ? Math.max(prev.medium_best || 0, total) : (prev.medium_best || 0),
+      hard_best: selectedLevel === 'hard' ? Math.max(prev.hard_best || 0, total) : (prev.hard_best || 0),
+      extreme_best: selectedLevel === 'extreme' ? Math.max(prev.extreme_best || 0, total) : (prev.extreme_best || 0),
+      updated_at: new Date().toISOString()
+    };
+
+    if (existing) {
+      await sb.from('stats').update(newStats).eq('user_id', currentUser.id);
+    } else {
+      await sb.from('stats').insert(newStats);
+    }
+
+    await loadUserStats();
+  } catch (e) {
+    console.error('Save score failed:', e);
+  }
+}
+
+// ================== AUTO LOGIN ==================
+(async () => {
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session?.user) {
+      const { data: profile } = await sb.from('profiles').select('username').eq('id', session.user.id).single();
+      if (profile) {
+        currentUser = { id: session.user.id, username: profile.username, email: session.user.email };
+        await loadUserStats();
+        showScreen('level-screen');
+      }
+    }
+  } catch (e) {
+    console.error('Auto-login failed:', e);
+  }
+})();
+</script>
